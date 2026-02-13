@@ -34,6 +34,7 @@ import re
 import mlflow
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit, current_timestamp, explode, array_join
+from pyspark.sql.types import StructType, StructField, StringType, FloatType, TimestampType
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
@@ -177,6 +178,24 @@ USING DELTA
 """)
 
 print("✅ Gold layer tables created")
+
+# Define explicit schema to match table (avoid type inference issues)
+clinical_summaries_schema = StructType([
+    StructField("mrn", StringType(), True),
+    StructField("patient_name", StringType(), True),
+    StructField("visit_date", StringType(), True),
+    StructField("document_id", StringType(), True),
+    StructField("soap_note", StringType(), True),
+    StructField("sections", StringType(), True),
+    StructField("quality_metrics", StringType(), True),
+    StructField("human_feedback", StringType(), True),
+    StructField("completeness_before", FloatType(), True),
+    StructField("completeness_after", FloatType(), True),
+    StructField("improvement_delta", FloatType(), True),
+    StructField("generation_timestamp", TimestampType(), True)
+])
+
+print("✅ Schema defined")
 
 # COMMAND ----------
 
@@ -549,13 +568,13 @@ data = [{
     "sections": json.dumps(soap_result['sections']),
     "quality_metrics": json.dumps(soap_result['quality_metrics']),
     "human_feedback": json.dumps([]),
-    "completeness_before": ambiguities_result.get('completeness_before', 0.8),
-    "completeness_after": 0.85,
-    "improvement_delta": 0.05,
+    "completeness_before": float(ambiguities_result.get('completeness_before', 0.8)),
+    "completeness_after": float(0.85),
+    "improvement_delta": float(0.05),
     "generation_timestamp": datetime.now()
 }]
 
-spark.createDataFrame(data).write.format("delta").mode("append").saveAsTable(GOLD_CLINICAL_SUMMARIES)
+spark.createDataFrame(data, schema=clinical_summaries_schema).write.format("delta").mode("append").saveAsTable(GOLD_CLINICAL_SUMMARIES)
 print(f"✅ Saved to: {GOLD_CLINICAL_SUMMARIES}")
 
 # COMMAND ----------
@@ -599,9 +618,9 @@ def process_document_batch(row):
             "sections": json.dumps(soap_result['sections']),
             "quality_metrics": json.dumps(soap_result['quality_metrics']),
             "human_feedback": json.dumps([]),
-            "completeness_before": ambiguities_result.get('completeness_before', 0.8),
-            "completeness_after": 0.85,
-            "improvement_delta": 0.05,
+            "completeness_before": float(ambiguities_result.get('completeness_before', 0.8)),
+            "completeness_after": float(0.85),
+            "improvement_delta": float(0.05),
             "generation_timestamp": datetime.now(),
             "status": "success"
         }
@@ -615,9 +634,9 @@ def process_document_batch(row):
             "sections": "{}",
             "quality_metrics": "{}",
             "human_feedback": "[]",
-            "completeness_before": 0.0,
-            "completeness_after": 0.0,
-            "improvement_delta": 0.0,
+            "completeness_before": float(0.0),
+            "completeness_after": float(0.0),
+            "improvement_delta": float(0.0),
             "generation_timestamp": datetime.now(),
             "status": "error"
         }
@@ -636,9 +655,20 @@ for i, doc in enumerate(batch_docs, 1):
 
 # Save results
 if results:
-    results_df = spark.createDataFrame(results)
+    # Remove 'status' field before saving (not in table schema)
+    clean_results = []
+    for r in results:
+        clean_r = {k: v for k, v in r.items() if k != 'status'}
+        clean_results.append(clean_r)
+
+    results_df = spark.createDataFrame(clean_results, schema=clinical_summaries_schema)
     results_df.write.format("delta").mode("append").saveAsTable(GOLD_CLINICAL_SUMMARIES)
-    print(f"\n✅ Batch processing complete! Saved {len(results)} SOAP notes")
+    print(f"\n✅ Batch processing complete! Saved {len(clean_results)} SOAP notes")
+
+    # Show status summary
+    success_count = sum(1 for r in results if r.get('status') == 'success')
+    error_count = sum(1 for r in results if r.get('status') == 'error')
+    print(f"   Success: {success_count}, Errors: {error_count}")
 
 # COMMAND ----------
 
@@ -689,9 +719,11 @@ if soap_notes:
 #
 # # Save all results
 # if all_results:
-#     results_df = spark.createDataFrame(all_results)
+#     # Remove 'status' field before saving
+#     clean_results = [{k: v for k, v in r.items() if k != 'status'} for r in all_results]
+#     results_df = spark.createDataFrame(clean_results, schema=clinical_summaries_schema)
 #     results_df.write.format("delta").mode("append").saveAsTable(GOLD_CLINICAL_SUMMARIES)
-#     print(f"\n✅ Complete! Processed {len(all_results)} documents")
+#     print(f"\n✅ Complete! Processed {len(clean_results)} documents")
 
 # COMMAND ----------
 
