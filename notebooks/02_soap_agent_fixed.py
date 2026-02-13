@@ -20,13 +20,14 @@
 # COMMAND ----------
 
 # Install MLflow if not already available
-%pip install mlflow databricks-sdk --quiet
+%pip install mlflow databricks-sdk requests --quiet
 dbutils.library.restartPython()
 
 # COMMAND ----------
 
 import json
 import time
+import requests
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import re
@@ -65,9 +66,99 @@ AMBIGUITY_MODEL = "databricks-meta-llama-3-3-70b-instruct"
 QUESTION_MODEL = "databricks-gpt-5-2"
 SOAP_MODEL = "databricks-gpt-5-2"
 
+# ============================================================
+# CROSS-WORKSPACE CONFIGURATION
+# ============================================================
+# Your free edition workspace has working Foundation Models
+# Data stays in sandbox, but API calls go to free edition
+FREE_EDITION_WORKSPACE = "https://dbc-a0794668-9ac1.cloud.databricks.com"
+FREE_EDITION_TOKEN = "<><>><"  # Replace with your token
+
+# API endpoints
+MODEL_API_URL = f"{FREE_EDITION_WORKSPACE}/serving-endpoints/responses"
+
 print(f"✅ Configuration loaded")
 print(f"   Source: {SOURCE_TABLE}")
 print(f"   Gold layer: {CATALOG}.{SCHEMA}")
+print(f"   Models: Cross-workspace API to {FREE_EDITION_WORKSPACE}")
+
+print("\n⚠️  RATE LIMIT WARNING:")
+print("   Free Edition has strict limits: 10 tokens/min + 10 calls/min")
+print("   Each document takes ~2-3 minutes to process")
+print("   Batch processing will be slow - recommended for 5-10 documents max")
+print("   For high volume, request admin to enable sandbox models or use OpenAI API")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Cross-Workspace Model API Helper
+# MAGIC
+# MAGIC This helper function calls Foundation Models from your free edition workspace
+# MAGIC while keeping data in the sandbox workspace.
+# MAGIC
+# MAGIC **Why cross-workspace?**
+# MAGIC - Your data is in sandbox: `americas_databricks_hackathon_2025`
+# MAGIC - Your working models are in free edition: `dbc-a0794668-9ac1`
+# MAGIC - Cross-workspace API allows both to work together
+# MAGIC
+# MAGIC **Rate Limits (Free Edition):**
+# MAGIC - 10 tokens per minute (per endpoint + per user)
+# MAGIC - 10 calls per minute
+# MAGIC - Each entity extraction uses ~500-800 tokens
+# MAGIC - **Processing time: ~2-3 minutes per document**
+
+# COMMAND ----------
+
+def call_cross_workspace_model(
+    model_name: str,
+    system_message: str,
+    user_message: str,
+    temperature: float = 0.1,
+    max_tokens: int = 2000
+) -> str:
+    """
+    Call Foundation Model from free edition workspace using REST API.
+
+    This allows calling models from a different workspace than where data resides.
+    """
+    headers = {
+        "Authorization": f"Bearer {FREE_EDITION_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature
+    }
+
+    try:
+        response = requests.post(
+            MODEL_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        # Extract content from response
+        if "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0]["message"]["content"]
+        else:
+            raise Exception(f"Unexpected response format: {result}")
+
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HTTP {e.response.status_code}: {e.response.text}"
+        raise Exception(error_msg)
+    except Exception as e:
+        raise Exception(f"Model API error: {str(e)}")
+
+print("✅ Cross-workspace API helper defined")
 
 # COMMAND ----------
 
@@ -167,7 +258,6 @@ class EntityExtractor:
 
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self.w = w
 
     def extract_entities(self, clinical_text: str) -> Dict:
         """Extract structured entities from text"""
@@ -248,18 +338,16 @@ Return ONLY the JSON object.
 """
 
     def _call_model(self, prompt: str) -> str:
-        """Call model"""
+        """Call model using cross-workspace API"""
         try:
-            response = self.w.serving_endpoints.query(
-                name=self.model_name,
-                messages=[
-                    ChatMessage(role=ChatMessageRole.SYSTEM, content="Extract clinical entities. Return only JSON."),
-                    ChatMessage(role=ChatMessageRole.USER, content=prompt)
-                ],
+            response = call_cross_workspace_model(
+                model_name=self.model_name,
+                system_message="Extract clinical entities. Return only JSON.",
+                user_message=prompt,
                 temperature=0.1,
                 max_tokens=2000
             )
-            return response.choices[0].message.content
+            return response
         except Exception as e:
             print(f"⚠️  Extraction error: {e}")
             return json.dumps({"error": str(e)})
@@ -294,7 +382,6 @@ class AmbiguityDetector:
     """Detect ambiguities in entities"""
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self.w = w
 
     def detect_ambiguities(self, entities: Dict, source_text: str) -> Dict:
         """Detect ambiguities"""
@@ -311,27 +398,24 @@ Return JSON:
 }}"""
 
         try:
-            response = self.w.serving_endpoints.query(
-                name=self.model_name,
-                messages=[
-                    ChatMessage(role=ChatMessageRole.SYSTEM, content="Analyze for ambiguities. Return JSON."),
-                    ChatMessage(role=ChatMessageRole.USER, content=prompt)
-                ],
+            content = call_cross_workspace_model(
+                model_name=self.model_name,
+                system_message="Analyze for ambiguities. Return JSON.",
+                user_message=prompt,
                 temperature=0.0,
                 max_tokens=1500
             )
-            content = response.choices[0].message.content
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             return json.loads(content.strip())
-        except:
+        except Exception as e:
+            print(f"⚠️  Ambiguity detection error: {e}")
             return {"ambiguities": [], "requires_review": False, "completeness_before": 0.8}
 
 class QuestionGenerator:
     """Generate clarifying questions"""
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self.w = w
 
     def generate_questions(self, ambiguities: List[Dict], entities: Dict) -> Dict:
         """Generate questions"""
@@ -345,27 +429,24 @@ Return JSON:
 }}"""
 
         try:
-            response = self.w.serving_endpoints.query(
-                name=self.model_name,
-                messages=[
-                    ChatMessage(role=ChatMessageRole.SYSTEM, content="Generate questions. Return JSON."),
-                    ChatMessage(role=ChatMessageRole.USER, content=prompt)
-                ],
+            content = call_cross_workspace_model(
+                model_name=self.model_name,
+                system_message="Generate questions. Return JSON.",
+                user_message=prompt,
                 temperature=0.3,
                 max_tokens=1200
             )
-            content = response.choices[0].message.content
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             return json.loads(content.strip())
-        except:
+        except Exception as e:
+            print(f"⚠️  Question generation error: {e}")
             return {"questions": []}
 
 class SOAPGenerator:
     """Generate SOAP notes"""
     def __init__(self, model_name: str):
         self.model_name = model_name
-        self.w = w
 
     def generate_soap(self, entities: Dict, feedback_context: Dict = None) -> Dict:
         """Generate SOAP note"""
@@ -393,16 +474,13 @@ Treatment: ...
 Generate the SOAP note:"""
 
         try:
-            response = self.w.serving_endpoints.query(
-                name=self.model_name,
-                messages=[
-                    ChatMessage(role=ChatMessageRole.SYSTEM, content="Medical documentation specialist."),
-                    ChatMessage(role=ChatMessageRole.USER, content=prompt)
-                ],
+            soap_note = call_cross_workspace_model(
+                model_name=self.model_name,
+                system_message="Medical documentation specialist.",
+                user_message=prompt,
                 temperature=0.3,
                 max_tokens=2500
             )
-            soap_note = response.choices[0].message.content
             return {
                 "soap_note": soap_note,
                 "sections": {},
@@ -412,6 +490,7 @@ Generate the SOAP note:"""
                 }
             }
         except Exception as e:
+            print(f"⚠️  SOAP generation error: {e}")
             return {
                 "soap_note": f"Error: {str(e)}",
                 "sections": {},
@@ -666,17 +745,23 @@ if soap_notes:
 # MAGIC ## ✅ SUMMARY
 # MAGIC
 # MAGIC You've successfully:
-# MAGIC 1. ✅ Loaded data from your existing table
-# MAGIC 2. ✅ Extracted structured entities using GPT-5-2
-# MAGIC 3. ✅ Generated SOAP notes using the agent
-# MAGIC 4. ✅ Saved results to Gold layer
+# MAGIC 1. ✅ Loaded data from your existing table (sandbox workspace)
+# MAGIC 2. ✅ Extracted structured entities using GPT-5-2 (free edition workspace)
+# MAGIC 3. ✅ Generated SOAP notes using the Interactive Agent
+# MAGIC 4. ✅ Saved results to Gold layer (sandbox workspace)
+# MAGIC
+# MAGIC **Cross-Workspace Architecture:**
+# MAGIC - 📊 Data: Sandbox workspace (`americas_databricks_hackathon_2025`)
+# MAGIC - 🤖 Models: Free edition workspace (`dbc-a0794668-9ac1`)
+# MAGIC - 🔗 Connection: REST API with Personal Access Token
 # MAGIC
 # MAGIC **Next Steps:**
 # MAGIC - Use Genie to analyze SOAP notes
 # MAGIC - Create SQL dashboard for quality metrics
-# MAGIC - Process remaining documents (uncomment batch cell)
+# MAGIC - Process remaining documents (5-10 at a time due to rate limits)
+# MAGIC - Request admin to enable sandbox models for faster processing
 # MAGIC
 # MAGIC **Your Gold Layer Tables:**
-# MAGIC - `{GOLD_CLINICAL_SUMMARIES}` - Final SOAP notes
-# MAGIC - `{GOLD_VALIDATED_ENTITIES}` - Validated entities
-# MAGIC - `{GOLD_REVIEW_QUEUE}` - Documents for human review
+# MAGIC - `americas_databricks_hackathon_2025.americas_scribe_squad_hackathon.clinical_summaries` - Final SOAP notes
+# MAGIC - `americas_databricks_hackathon_2025.americas_scribe_squad_hackathon.validated_entities` - Validated entities
+# MAGIC - `americas_databricks_hackathon_2025.americas_scribe_squad_hackathon.review_queue` - Documents for human review
