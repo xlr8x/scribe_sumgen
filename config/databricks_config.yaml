@@ -1,0 +1,168 @@
+# Databricks Configuration for Clinical Documentation Assistant
+
+# Unity Catalog Configuration
+catalog:
+  name: healthcare_catalog
+  comment: "Clinical documentation assistant data lakehouse"
+
+schemas:
+  bronze:
+    name: raw_zone
+    comment: "Raw ingested clinical documents"
+    tables:
+      - name: encounters_pdf_bronze
+        comment: "Binary PDF files from AutoLoader"
+      - name: parsed_documents
+        comment: "Parsed clinical text with sections"
+
+  silver:
+    name: silver_zone
+    comment: "Cleaned and extracted clinical data"
+    tables:
+      - name: extracted_entities
+        comment: "LLM-extracted clinical entities"
+
+  gold:
+    name: gold_zone
+    comment: "Validated summaries and final outputs"
+    tables:
+      - name: validated_entities
+        comment: "LLM-validated entities with confidence scores"
+      - name: clinical_summaries
+        comment: "Final SOAP note summaries"
+
+# Volumes for file storage
+volumes:
+  raw_documents:
+    path: "/Volumes/healthcare_catalog/raw_zone/encounter_pdfs"
+    comment: "Upload location for PDF files"
+
+  checkpoints:
+    path: "/Volumes/healthcare_catalog/raw_zone/checkpoints"
+    comment: "Streaming pipeline checkpoints"
+
+# Cluster Configuration
+cluster:
+  spark_version: "14.3.x-scala2.12"
+  node_type: "Standard_D4s_v3"  # Adjust based on cloud provider
+  num_workers: 2
+  autoscale:
+    min_workers: 2
+    max_workers: 8
+
+  spark_conf:
+    spark.databricks.delta.preview.enabled: "true"
+    spark.databricks.delta.properties.defaults.autoOptimize.optimizeWrite: "true"
+    spark.databricks.delta.properties.defaults.autoOptimize.autoCompact: "true"
+    spark.databricks.photon.enabled: "true"
+
+# Model Serving Endpoints
+model_serving:
+  endpoints:
+    - name: "databricks-dbrx-instruct"
+      type: "foundation_model_api"
+      use_case: ["extraction", "coherence_check", "summary_generation"]
+      config:
+        max_tokens: 2000
+        temperature: 0.1
+        top_p: 0.95
+
+    - name: "databricks-meta-llama-3-1-70b-instruct"
+      type: "foundation_model_api"
+      use_case: ["entity_validation"]
+      config:
+        max_tokens: 1000
+        temperature: 0.0
+        top_p: 1.0
+
+    - name: "databricks-mixtral-8x7b-instruct"
+      type: "foundation_model_api"
+      use_case: ["quality_scoring"]
+      config:
+        max_tokens: 800
+        temperature: 0.0
+        top_p: 1.0
+
+# Delta Live Tables Pipeline
+dlt_pipeline:
+  name: "clinical_scribe_pipeline"
+  target_schema: "clinical_catalog.gold"
+  storage_location: "/pipelines/clinical_scribe"
+  configuration:
+    pipelines.autoOptimize.managed: "true"
+    pipelines.enableTrackHistory: "true"
+
+  clusters:
+    - label: "default"
+      num_workers: 2
+      node_type: "Standard_D4s_v3"
+
+  trigger:
+    type: "continuous"
+    pause_status: "UNPAUSED"
+
+# Lakehouse Monitoring
+monitoring:
+  granularities: ["1 hour", "1 day"]
+  slicing_columns:
+    - overall_score
+    - soap_quality_score
+    - requires_review
+
+  custom_metrics:
+    - name: "avg_validation_score"
+      type: "aggregate"
+      definition: "AVG(CAST(overall_score AS DOUBLE))"
+
+    - name: "processing_latency_seconds"
+      type: "derived"
+      definition: "UNIX_TIMESTAMP(generation_timestamp) - UNIX_TIMESTAMP(ingestion_timestamp)"
+
+    - name: "high_quality_rate"
+      type: "aggregate"
+      definition: "SUM(CASE WHEN CAST(soap_quality_score AS DOUBLE) >= 0.8 THEN 1 ELSE 0 END) / COUNT(*)"
+
+# Workflows
+workflows:
+  - name: "clinical_scribe_batch_processing"
+    schedule: "0 */6 * * *"  # Every 6 hours
+    tasks:
+      - name: "trigger_dlt_pipeline"
+        type: "pipeline"
+        pipeline_id: "${var.dlt_pipeline_id}"
+
+      - name: "generate_quality_report"
+        type: "notebook"
+        notebook_path: "/notebooks/05_monitoring"
+        depends_on: ["trigger_dlt_pipeline"]
+
+# Secrets Scope (for API keys, credentials)
+secrets:
+  scope_name: "clinical_scribe_secrets"
+  keys:
+    - databricks_token
+    - azure_openai_key  # If using Azure OpenAI
+    - umls_api_key      # For medical terminology validation
+
+# Feature Flags
+features:
+  enable_vector_search: true
+  enable_medical_terminology_validation: false  # Requires UMLS credentials
+  enable_real_time_processing: true
+  enable_batch_processing: true
+  enable_monitoring_alerts: true
+
+# Performance Tuning
+performance:
+  autoloader_max_files_per_trigger: 10
+  dlt_processing_time_seconds: 10
+  streaming_checkpoint_interval: "10 seconds"
+  model_serving_provisioned_throughput: true  # For production
+  enable_photon: true
+  enable_liquid_clustering: true
+
+# Logging
+logging:
+  level: "INFO"
+  format: "json"
+  destination: "dbfs:/logs/clinical_scribe/"

@@ -1,0 +1,351 @@
+# LLM Model Configuration for Clinical Documentation Assistant
+
+# Model Selection Strategy
+# Use Databricks Foundation Models for all tasks to maximize performance and minimize cost
+
+models:
+  # Entity Extraction
+  extraction:
+    primary:
+      name: "databricks-dbrx-instruct"
+      type: "foundation_model"
+      provider: "databricks"
+      config:
+        max_tokens: 2000
+        temperature: 0.1    # Low for factual extraction
+        top_p: 0.95
+        stop_sequences: null
+        timeout_seconds: 30
+
+    fallback:
+      name: "databricks-meta-llama-3-1-70b-instruct"
+      type: "foundation_model"
+      provider: "databricks"
+
+  # LLM-as-Judge: Entity Validation (Tier 1)
+  entity_validation:
+    primary:
+      name: "databricks-meta-llama-3-1-70b-instruct"
+      type: "foundation_model"
+      provider: "databricks"
+      config:
+        max_tokens: 1000
+        temperature: 0.0    # Deterministic for validation
+        top_p: 1.0
+        timeout_seconds: 20
+
+    rationale: "Fast inference, excellent reasoning for validation tasks"
+
+  # LLM-as-Judge: Coherence Check (Tier 2)
+  coherence_check:
+    primary:
+      name: "databricks-dbrx-instruct"
+      type: "foundation_model"
+      provider: "databricks"
+      config:
+        max_tokens: 1000
+        temperature: 0.1
+        top_p: 0.95
+        timeout_seconds: 20
+
+    rationale: "Strong medical reasoning capabilities"
+
+  # LLM-as-Judge: Quality Scoring (Tier 3)
+  quality_scoring:
+    primary:
+      name: "databricks-mixtral-8x7b-instruct"
+      type: "foundation_model"
+      provider: "databricks"
+      config:
+        max_tokens: 800
+        temperature: 0.0
+        top_p: 1.0
+        timeout_seconds: 15
+
+    rationale: "Efficient scoring, fast inference"
+
+  # Summary Generation
+  summary_generation:
+    primary:
+      name: "databricks-dbrx-instruct"
+      type: "foundation_model"
+      provider: "databricks"
+      config:
+        max_tokens: 2500
+        temperature: 0.3    # Slightly higher for natural prose
+        top_p: 0.95
+        timeout_seconds: 40
+
+    rationale: "Long context, excellent medical writing"
+
+  # Embeddings for Vector Search
+  embeddings:
+    primary:
+      name: "databricks-bge-large-en"
+      type: "embedding_model"
+      provider: "databricks"
+      config:
+        dimensions: 1024
+        normalize: true
+
+# Prompt Templates
+prompts:
+  entity_extraction:
+    version: "1.0"
+    system_message: "You are a medical AI assistant specialized in clinical documentation. Extract structured information precisely from clinical notes."
+
+    user_template: |
+      Extract structured clinical information from this note. Be precise and only extract information explicitly stated.
+
+      CLINICAL NOTE:
+      {clinical_text}
+
+      Extract the following entities in JSON format:
+      {{
+        "chief_complaint": "primary reason for visit",
+        "symptoms": [
+          {{
+            "symptom": "symptom name",
+            "onset": "when started",
+            "severity": "mild/moderate/severe",
+            "location": "body location if applicable"
+          }}
+        ],
+        "diagnoses": [
+          {{
+            "diagnosis": "diagnosis name",
+            "icd10_code": "ICD-10 code if mentioned",
+            "status": "confirmed/suspected/differential"
+          }}
+        ],
+        "medications": [
+          {{
+            "name": "medication name",
+            "dosage": "dosage if specified",
+            "frequency": "frequency if specified",
+            "route": "route of administration"
+          }}
+        ],
+        "procedures": [
+          {{
+            "procedure": "procedure name",
+            "cpt_code": "CPT code if mentioned"
+          }}
+        ],
+        "vital_signs": {{
+          "blood_pressure": "value",
+          "temperature": "value with unit",
+          "heart_rate": "value",
+          "respiratory_rate": "value",
+          "oxygen_saturation": "value"
+        }},
+        "allergies": ["allergy1", "allergy2"],
+        "social_history": {{
+          "smoking": "status",
+          "alcohol": "status"
+        }},
+        "extraction_confidence": "high/medium/low",
+        "missing_information": ["list of critical missing data"]
+      }}
+
+      IMPORTANT:
+      - Only extract information explicitly stated
+      - Do not infer or assume
+      - Use null for missing fields
+      - Use proper medical terminology
+      - Return ONLY valid JSON
+
+      JSON OUTPUT:
+
+    few_shot_examples:
+      - input: "Patient presents with fever (102°F), cough, and shortness of breath for 3 days. Diagnosed with pneumonia. Prescribed Amoxicillin 500mg TID."
+        output: |
+          {
+            "chief_complaint": "Fever, cough, and shortness of breath",
+            "symptoms": [
+              {"symptom": "Fever", "onset": "3 days ago", "severity": "moderate", "location": null},
+              {"symptom": "Cough", "onset": "3 days ago", "severity": null, "location": "chest"},
+              {"symptom": "Shortness of breath", "onset": "3 days ago", "severity": null, "location": null}
+            ],
+            "diagnoses": [
+              {"diagnosis": "Pneumonia", "icd10_code": null, "status": "confirmed"}
+            ],
+            "medications": [
+              {"name": "Amoxicillin", "dosage": "500mg", "frequency": "TID", "route": "oral"}
+            ],
+            "vital_signs": {"temperature": "102°F"},
+            "extraction_confidence": "high"
+          }
+
+  entity_validation:
+    version: "1.0"
+    system_message: "You are a medical validation AI. Verify that extracted clinical entities accurately match the source text."
+
+    user_template: |
+      Compare extracted entities against source text.
+
+      SOURCE TEXT:
+      {original_text}
+
+      EXTRACTED ENTITIES:
+      {extracted_json}
+
+      Validate:
+      1. Are all extracted entities present in source?
+      2. Are details accurate (dosages, severities)?
+      3. Any hallucinations?
+      4. Missing critical info?
+
+      Return JSON:
+      {{
+        "accuracy_score": <0.0-1.0>,
+        "verified_entities": {{"symptoms": <count>, "diagnoses": <count>, "medications": <count>}},
+        "hallucinations": [<list>],
+        "missing_critical_info": [<list>],
+        "corrections": {{}},
+        "confidence": "high/medium/low"
+      }}
+
+      JSON OUTPUT:
+
+  coherence_check:
+    version: "1.0"
+    system_message: "You are a clinical reviewer AI. Assess medical coherence and logical consistency."
+
+    user_template: |
+      Assess clinical coherence:
+
+      CLINICAL DATA:
+      {extracted_json}
+
+      Check:
+      1. Diagnosis-symptom alignment?
+      2. Medication appropriateness?
+      3. Contradictions?
+      4. Safety concerns?
+
+      Return JSON:
+      {{
+        "coherence_score": <0.0-1.0>,
+        "diagnosis_symptom_alignment": "aligned/partial/misaligned",
+        "medication_appropriateness": "appropriate/questionable/inappropriate",
+        "contradictions": [],
+        "safety_concerns": [],
+        "missing_expected_info": [],
+        "clinical_reasoning": "",
+        "risk_level": "low/medium/high"
+      }}
+
+      JSON OUTPUT:
+
+  quality_scoring:
+    version: "1.0"
+    system_message: "You are a quality assessment AI. Calculate overall extraction quality."
+
+    user_template: |
+      Calculate overall quality:
+
+      ENTITY ACCURACY:
+      {tier1_result}
+
+      COHERENCE:
+      {tier2_result}
+
+      Scoring:
+      - Accuracy: 50%
+      - Coherence: 30%
+      - Completeness: 20%
+
+      Grades:
+      - 0.90-1.00: Excellent
+      - 0.75-0.89: Good
+      - 0.60-0.74: Fair
+      - <0.60: Poor
+
+      Return JSON:
+      {{
+        "overall_score": <0.0-1.0>,
+        "grade": "excellent/good/fair/poor",
+        "pass": <true/false>,
+        "key_strengths": [],
+        "key_weaknesses": [],
+        "recommendation": "approve/review/reject",
+        "reasoning": ""
+      }}
+
+      JSON OUTPUT:
+
+  soap_generation:
+    version: "1.0"
+    system_message: "You are an expert medical documentation specialist. Generate professional SOAP notes."
+
+    user_template: |
+      Generate professional SOAP note:
+
+      VALIDATED DATA:
+      {validated_entities}
+
+      Format:
+
+      **SUBJECTIVE**
+      Chief Complaint:
+      History of Present Illness:
+      Medications:
+      Allergies:
+      Social History:
+
+      **OBJECTIVE**
+      Vital Signs:
+      Physical Examination:
+
+      **ASSESSMENT**
+      1. [Primary diagnosis with ICD-10]
+      2. [Secondary diagnoses]
+
+      **PLAN**
+      1. Diagnostics:
+      2. Treatment:
+      3. Follow-up:
+
+      Requirements:
+      - Professional medical terminology
+      - Concise but complete
+      - Proper formatting
+      - Note "Not documented" if missing
+      - Clinical accuracy
+
+      Generate SOAP note:
+
+# Retry Configuration
+retry:
+  max_attempts: 3
+  backoff_factor: 2
+  timeout_seconds: 60
+
+# Caching Configuration
+caching:
+  enable_prompt_caching: true
+  cache_ttl_seconds: 3600
+  cache_backend: "databricks"
+
+# Quality Thresholds
+quality_thresholds:
+  extraction_confidence_min: 0.6
+  entity_validation_min: 0.75
+  coherence_score_min: 0.70
+  overall_quality_min: 0.75
+  soap_quality_min: 0.80
+
+# Performance Targets
+performance_targets:
+  extraction_latency_max_seconds: 5
+  validation_latency_max_seconds: 3
+  summary_latency_max_seconds: 4
+  end_to_end_latency_max_seconds: 20
+
+# Cost Optimization
+cost_optimization:
+  use_databricks_native_first: true
+  enable_batch_inference: true
+  enable_response_caching: true
+  prefer_smaller_models_when_possible: true
