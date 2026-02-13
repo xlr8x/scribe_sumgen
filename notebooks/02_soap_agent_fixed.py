@@ -60,11 +60,12 @@ GOLD_REVIEW_QUEUE = f"{CATALOG}.{SCHEMA}.review_queue"
 GOLD_CLINICAL_SUMMARIES = f"{CATALOG}.{SCHEMA}.clinical_summaries"
 GOLD_VALIDATED_ENTITIES = f"{CATALOG}.{SCHEMA}.validated_entities"
 
-# Models
-ENTITY_EXTRACTION_MODEL = "databricks-gpt-5-2"  # For parsing clinical text
-AMBIGUITY_MODEL = "databricks-meta-llama-3-3-70b-instruct"
-QUESTION_MODEL = "databricks-gpt-5-2"
-SOAP_MODEL = "databricks-gpt-5-2"
+# Models (using free edition workspace model names)
+# NOTE: Using GPT-5.2 Codex for all tasks (confirmed working in free edition)
+ENTITY_EXTRACTION_MODEL = "databricks-gpt-5-2-codex"  # For parsing clinical text
+AMBIGUITY_MODEL = "databricks-gpt-5-2-codex"  # Using GPT instead of Llama for free edition
+QUESTION_MODEL = "databricks-gpt-5-2-codex"
+SOAP_MODEL = "databricks-gpt-5-2-codex"
 
 # ============================================================
 # CROSS-WORKSPACE CONFIGURATION
@@ -72,7 +73,7 @@ SOAP_MODEL = "databricks-gpt-5-2"
 # Your free edition workspace has working Foundation Models
 # Data stays in sandbox, but API calls go to free edition
 FREE_EDITION_WORKSPACE = "https://dbc-a0794668-9ac1.cloud.databricks.com"
-FREE_EDITION_TOKEN = "<><>><"  # Replace with your token
+FREE_EDITION_TOKEN = ""  # Replace with your token
 
 # API endpoints
 MODEL_API_URL = f"{FREE_EDITION_WORKSPACE}/serving-endpoints/responses"
@@ -81,6 +82,7 @@ print(f"✅ Configuration loaded")
 print(f"   Source: {SOURCE_TABLE}")
 print(f"   Gold layer: {CATALOG}.{SCHEMA}")
 print(f"   Models: Cross-workspace API to {FREE_EDITION_WORKSPACE}")
+print(f"   Using model: {ENTITY_EXTRACTION_MODEL}")
 
 print("\n⚠️  RATE LIMIT WARNING:")
 print("   Free Edition has strict limits: 10 tokens/min + 10 calls/min")
